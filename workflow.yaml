@@ -1,0 +1,134 @@
+main:
+  params: [args]
+  steps:
+    - init_log:
+        call: sys.log
+        args:
+          text: '${"Starting cost optimizer workflow. Action: " + args.action + ", Region: " + args.region + ", Target Label: " + args.vm_label_key + "=" + args.vm_label_value}'
+          severity: INFO
+
+    # -------------------------------------------------------------------------
+    # PHASE 1: GKE NODE POOL MANAGEMENT (MULTIPLE TARGETS)
+    # -------------------------------------------------------------------------
+    - check_gke_configuration:
+        switch:
+          - condition: '${"gke_targets" in args and len(args.gke_targets) > 0}'
+            next: process_gke_loop
+        next: list_all_project_vms
+
+    - process_gke_loop:
+        for:
+          value: target
+          in: '${args.gke_targets}'
+          steps:
+            - execute_gke_action:
+                switch:
+                  - condition: '${args.action == "stop"}'
+                    steps:
+                      - log_gke_stop:
+                          call: sys.log
+                          args:
+                            text: '${"Scaling down node pool: " + target.nodepool + " in cluster: " + target.cluster}'
+                            severity: INFO
+                      - disable_gke_autoscaler:
+                          call: googleapis.container.v1.projects.locations.clusters.nodePools.setAutoscaling
+                          args:
+                            name: '${"projects/" + args.project_id + "/locations/" + args.region + "/clusters/" + target.cluster + "/nodePools/" + target.nodepool}'
+                            body:
+                              autoscaling:
+                                enabled: false
+                      - force_gke_size_zero:
+                          call: googleapis.container.v1.projects.locations.clusters.nodePools.setSize
+                          args:
+                            name: '${"projects/" + args.project_id + "/locations/" + args.region + "/clusters/" + target.cluster + "/nodePools/" + target.nodepool}'
+                            body:
+                              nodeCount: 0
+
+                  - condition: '${args.action == "start"}'
+                    steps:
+                      - log_gke_start:
+                          call: sys.log
+                          args:
+                            text: '${"Enabling GKE autoscaling for: " + target.nodepool + " (min=" + string(target.min_nodes) + ", max=" + string(target.max_nodes) + ")"}'
+                            severity: INFO
+                      - enable_gke_autoscaler:
+                          call: googleapis.container.v1.projects.locations.clusters.nodePools.setAutoscaling
+                          args:
+                            name: '${"projects/" + args.project_id + "/locations/" + args.region + "/clusters/" + target.cluster + "/nodePools/" + target.nodepool}'
+                            body:
+                              autoscaling:
+                                enabled: true
+                                minNodeCount: '${target.min_nodes}'
+                                maxNodeCount: '${target.max_nodes}'
+
+    # -------------------------------------------------------------------------
+    # PHASE 2: COMPUTE ENGINE VM MANAGEMENT
+    # -------------------------------------------------------------------------
+    - list_all_project_vms:
+        call: googleapis.compute.v1.instances.aggregatedList
+        args:
+          project: '${args.project_id}'
+          filter: '${"labels." + args.vm_label_key + "=" + args.vm_label_value}'
+        result: agg_response
+
+    - log_vm_query:
+        call: sys.log
+        args:
+          text: '${"Queried instances with filter [labels." + args.vm_label_key + "=" + args.vm_label_value + "]. Parsing regional zones..."}'
+          severity: INFO
+
+    - process_regional_zones:
+        for:
+          value: zone_name
+          in: '${keys(agg_response.items)}'
+          steps:
+            - extract_zone_data:
+                assign:
+                  - zone_data: '${agg_response.items[zone_name]}'
+                  
+            - check_region_and_instances:
+                switch:
+                  - condition: '${len(text.split(zone_name, "zones/" + args.region)) > 1 and "instances" in zone_data}'
+                    steps:
+                      - log_matching_zone:
+                          call: sys.log
+                          args:
+                            text: '${"Found " + string(len(zone_data.instances)) + " matching VM(s) in zone: " + text.split(zone_name, "/")[1]}'
+                            severity: INFO
+                      - process_instances:
+                          for:
+                            value: instance
+                            in: '${zone_data.instances}'
+                            steps:
+                              - execute_vm_action:
+                                  switch:
+                                    - condition: '${args.action == "stop"}'
+                                      steps:
+                                        - log_stopping_vm:
+                                            call: sys.log
+                                            args:
+                                              text: '${"Executing STOP on VM: " + instance.name + " (Zone: " + text.split(zone_name, "/")[1] + ")"}'
+                                              severity: INFO
+                                        - stop_vm:
+                                            call: googleapis.compute.v1.instances.stop
+                                            args:
+                                              project: '${args.project_id}'
+                                              zone: '${text.split(zone_name, "/")[1]}'
+                                              instance: '${instance.name}'
+
+                                    - condition: '${args.action == "start"}'
+                                      steps:
+                                        - log_starting_vm:
+                                            call: sys.log
+                                            args:
+                                              text: '${"Executing START on VM: " + instance.name + " (Zone: " + text.split(zone_name, "/")[1] + ")"}'
+                                              severity: INFO
+                                        - start_vm:
+                                            call: googleapis.compute.v1.instances.start
+                                            args:
+                                              project: '${args.project_id}'
+                                              zone: '${text.split(zone_name, "/")[1]}'
+                                              instance: '${instance.name}'
+
+    - return_success:
+        return: "Infrastructure operation completed successfully."
