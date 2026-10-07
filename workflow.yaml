@@ -4,17 +4,24 @@ main:
     - init_log:
         call: sys.log
         args:
-          text: '${"Starting cost optimizer workflow. Action: " + args.action + ", Region: " + args.region + ", Target Label: " + args.vm_label_key + "=" + args.vm_label_value}'
+          text: '${"Execution started. Action: " + args.action + ", Target Component: " + args.target_component}'
           severity: INFO
 
+    - route_request:
+        switch:
+          - condition: '${args.target_component == "gke"}'
+            next: check_gke_configuration
+          - condition: '${args.target_component == "vm"}'
+            next: list_all_project_vms
+
     # -------------------------------------------------------------------------
-    # PHASE 1: GKE NODE POOL MANAGEMENT (MULTIPLE TARGETS)
+    # GKE NODE POOL ROUTINE
     # -------------------------------------------------------------------------
     - check_gke_configuration:
         switch:
           - condition: '${"gke_targets" in args and len(args.gke_targets) > 0}'
             next: process_gke_loop
-        next: list_all_project_vms
+        next: return_success
 
     - process_gke_loop:
         for:
@@ -60,9 +67,10 @@ main:
                                 enabled: true
                                 minNodeCount: '${target.min_nodes}'
                                 maxNodeCount: '${target.max_nodes}'
+        next: return_success
 
     # -------------------------------------------------------------------------
-    # PHASE 2: COMPUTE ENGINE VM MANAGEMENT
+    # COMPUTE ENGINE VM ROUTINE
     # -------------------------------------------------------------------------
     - list_all_project_vms:
         call: googleapis.compute.v1.instances.aggregatedList
