@@ -2,14 +2,13 @@
 source variables.env
 
 echo "Deploying Workflow: $WORKFLOW_NAME..."
-gcloud workflows deploy ${WORKFLOW_NAME} \
-  --source=${WORKFLOW_FILE} \
-  --location=${REGION} \
-  --project=${PROJECT_ID}
+gcloud workflows deploy "${WORKFLOW_NAME}" \
+  --source="${WORKFLOW_FILE}" \
+  --location="${REGION}" \
+  --project="${PROJECT_ID}"
 
 echo "Generating JSON Payloads for Cloud Scheduler..."
 
-# Function to generate payload
 generate_payload() {
   local action=$1
   local component=$2
@@ -29,48 +28,47 @@ generate_payload "stop" "vm" > stop_vm.json
 generate_payload "start" "vm" > start_vm.json
 generate_payload "start" "gke" > start_gke.json
 
-echo "Deploying Cloud Scheduler Jobs for $APP_NAME..."
+deploy_scheduler_job() {
+  local job_name=$1
+  local cron_schedule=$2
+  local payload_file=$3
+  local uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/${WORKFLOW_NAME}/executions"
 
-# 1. GKE Stop
-gcloud scheduler jobs update http schd-${APP_NAME}-gke-stop \
-    --location="${REGION}" --project="${PROJECT_ID}" --schedule="${GKE_STOP_CRON}" --time-zone="${TIMEZONE}" \
-    --message-body-from-file="stop_gke.json" --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/${WORKFLOW_NAME}/executions" \
-    --oauth-service-account-email="${SERVICE_ACCOUNT}" --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform" || \
-gcloud scheduler jobs create http schd-${APP_NAME}-gke-stop \
-    --location="${REGION}" --project="${PROJECT_ID}" --schedule="${GKE_STOP_CRON}" --time-zone="${TIMEZONE}" \
-    --message-body-from-file="stop_gke.json" --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/${WORKFLOW_NAME}/executions" \
-    --oauth-service-account-email="${SERVICE_ACCOUNT}" --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
+  echo "Configuring Scheduler Job: ${job_name}..."
 
-# 2. VM Stop
-gcloud scheduler jobs update http schd-${APP_NAME}-vm-stop \
-    --location="${REGION}" --project="${PROJECT_ID}" --schedule="${VM_STOP_CRON}" --time-zone="${TIMEZONE}" \
-    --message-body-from-file="stop_vm.json" --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/${WORKFLOW_NAME}/executions" \
-    --oauth-service-account-email="${SERVICE_ACCOUNT}" --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform" || \
-gcloud scheduler jobs create http schd-${APP_NAME}-vm-stop \
-    --location="${REGION}" --project="${PROJECT_ID}" --schedule="${VM_STOP_CRON}" --time-zone="${TIMEZONE}" \
-    --message-body-from-file="stop_vm.json" --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/${WORKFLOW_NAME}/executions" \
-    --oauth-service-account-email="${SERVICE_ACCOUNT}" --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
+  if gcloud scheduler jobs describe "${job_name}" --location="${REGION}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+    gcloud scheduler jobs update http "${job_name}" \
+      --location="${REGION}" \
+      --project="${PROJECT_ID}" \
+      --schedule="${cron_schedule}" \
+      --time-zone="${TIMEZONE}" \
+      --uri="${uri}" \
+      --message-body-from-file="${payload_file}" \
+      --oauth-service-account-email="${SERVICE_ACCOUNT}" \
+      --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform" \
+      --quiet
+  else
+    gcloud scheduler jobs create http "${job_name}" \
+      --location="${REGION}" \
+      --project="${PROJECT_ID}" \
+      --schedule="${cron_schedule}" \
+      --time-zone="${TIMEZONE}" \
+      --uri="${uri}" \
+      --message-body-from-file="${payload_file}" \
+      --oauth-service-account-email="${SERVICE_ACCOUNT}" \
+      --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform" \
+      --quiet
+  fi
+}
 
-# 3. VM Start
-gcloud scheduler jobs update http schd-${APP_NAME}-vm-start \
-    --location="${REGION}" --project="${PROJECT_ID}" --schedule="${VM_START_CRON}" --time-zone="${TIMEZONE}" \
-    --message-body-from-file="start_vm.json" --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/${WORKFLOW_NAME}/executions" \
-    --oauth-service-account-email="${SERVICE_ACCOUNT}" --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform" || \
-gcloud scheduler jobs create http schd-${APP_NAME}-vm-start \
-    --location="${REGION}" --project="${PROJECT_ID}" --schedule="${VM_START_CRON}" --time-zone="${TIMEZONE}" \
-    --message-body-from-file="start_vm.json" --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/${WORKFLOW_NAME}/executions" \
-    --oauth-service-account-email="${SERVICE_ACCOUNT}" --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
+echo "Deploying Cloud Scheduler Jobs for ${APP_NAME}..."
 
-# 4. GKE Start
-gcloud scheduler jobs update http schd-${APP_NAME}-gke-start \
-    --location="${REGION}" --project="${PROJECT_ID}" --schedule="${GKE_START_CRON}" --time-zone="${TIMEZONE}" \
-    --message-body-from-file="start_gke.json" --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/${WORKFLOW_NAME}/executions" \
-    --oauth-service-account-email="${SERVICE_ACCOUNT}" --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform" || \
-gcloud scheduler jobs create http schd-${APP_NAME}-gke-start \
-    --location="${REGION}" --project="${PROJECT_ID}" --schedule="${GKE_START_CRON}" --time-zone="${TIMEZONE}" \
-    --message-body-from-file="start_gke.json" --uri="https://workflowexecutions.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/workflows/${WORKFLOW_NAME}/executions" \
-    --oauth-service-account-email="${SERVICE_ACCOUNT}" --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
+deploy_scheduler_job "schd-${APP_NAME}-gke-stop" "${GKE_STOP_CRON}" "stop_gke.json"
+deploy_scheduler_job "schd-${APP_NAME}-vm-stop" "${VM_STOP_CRON}" "stop_vm.json"
+deploy_scheduler_job "schd-${APP_NAME}-vm-start" "${VM_START_CRON}" "start_vm.json"
+deploy_scheduler_job "schd-${APP_NAME}-gke-start" "${GKE_START_CRON}" "start_gke.json"
 
 echo "Cleaning up temporary payload files..."
 rm stop_gke.json stop_vm.json start_vm.json start_gke.json
-echo "Deployment Complete for $APP_NAME!"
+
+echo "Deployment Complete for ${APP_NAME}!"
